@@ -12,61 +12,109 @@ the `await` keyword to wait for a future to become ready, called *awaiting a
 future*. Each place you await a future within an async block or function is a
 place that async block or function may get paused and resumed.
 
-> Note: Many other languages use the `async` and `await` keywords for async
-> programming. If you are familiar with other languages’ approach to async, you
-> may notice some significant differences in how Rust does things, including how
-> it handles the syntax. That is for good reason, as we will see!
+(Some other languages also use `async` and `await` keywords for async
+programming. If you are familiar with those languages, you may notice some
+significant differences in how Rust does things, including how it handles the
+syntax. That is for good reason, as we will see!)
 
 That may all feel a bit abstract. Let’s write our first async program: a little
-web scraper. This will have a fair bit of new syntax, but don’t worry. We will
-explain it all as we go.
+web scraper. We will pass in two URLs from the command line, fetch both of them
+concurrently, and return the result of whichever one finishes first. This
+example will have a fair bit of new syntax, but don’t worry. We will explain
+everything you need to know as we go.
 
-<!--
-  TODO: replace the example code here and the associated discussion with the web
-  scraper example we came up with.
--->
+### Our First Async Program
 
-Let’s write our first async function, and call it:
+To keep this chapter focused on learning async, rather than juggling parts of
+the ecosystem, we have created the `trpl` crate (`trpl` is short for “The Rust
+Programming Language”). It re-exports all the types, traits, and functions you
+will need, primarily from the [`futures`][futures-crate] and [`tokio`][tokio]
+crates.
 
-<Listing number="17-1" file-name="src/main.rs" caption="Defining a very simple async function">
+- The `futures` crate is an official home for Rust experimentation for async
+  code, and is actually where the `Future` type was originally designed.
+
+- Tokio is the most widely used async runtime in Rust today, especially (but
+  not only!) for web applications. There are other great runtimes out there,
+  and they may be more suitable for your purposes. We use Tokio under the hood
+  for `trpl` because it is good and widely used.
+
+In some cases, `trpl` also renames or wraps the original APIs to let us stay
+focused on the details relevant to chapter. If you want to understand what the
+crate does, we encourage you to check out [its source code][crate-source]. You
+will be able to see what crate each re-export comes from, and we have left
+extensive comments explaining what the crate does.
+
+Go ahead and add the `trpl` crate to your `hello-async` project:
+
+```console
+$ cargo add trpl
+```
+
+Now we can use the various pieces provided by `trpl` to write our first async
+program. We will build a little command line tool which fetches two web pages,
+pulls the `<title>` element from each, and prints out the title of whichever
+finishes that whole process first.
+
+In Listing 17-1, we define a function named `page_title_for`, and we mark it
+with the `async` keyword. Then we use the `trpl::get` function to fetch whatever
+URL is passed in, and, and we await the response by using the `await` keyword.
+Then we get the text of the response by calling its `text` method and once again
+awaiting it with the `await` keyword. Both of these steps are asynchronous. For
+`get`, we need to wait for the server to send back the first part of its
+response, which will include HTTP headers, cookies, and so on. That part of the
+response can be delivered separately from the body of the request. Especially if
+the body is very large, it can take some time for it all to arrive. Thus, we
+have to wait for the *entirety* of the response to arrive, so the `text` method
+is also async.
+
+Once we have `response_text`, we can then parse it into HTML with `Html::parse`
+and select the `title` element from it using the `select` method. We use
+`Option::map` to get the title contents if it, because the document may not have
+a `title` element in it at all.
+
+<Listing number="17-1" file-name="src/main.rs" caption="Defining an async function to get the title element from an HTML page">
 
 ```rust
-{{#rustdoc_include ../listings/ch17-async-await/listing-17-01/src/main.rs:all}}
+{{#include ../listings/ch17-async-await/listing-scraper-01/src/main.rs:all}}
 ```
 
 </Listing>
 
-If we compile and run this… nothing happens, and we get a compiler warning:
 
-```console
-{{#include ../listings/ch17-async-await/listing-17-01/output.txt}}
+
+Second, Rust’s `await` keyword goes after the expression you are awaiting, not
+before it. That is, it is a *postfix keyword*. This may be different from what
+you might be used to if you have used async in other languages. Rust chose this
+because it makes chains of methods much nicer to work with. As a result, we can
+change the body of `page_url_for` to chain the `trpl::get` and `text` function
+calls together with `await` between them, as shown in Listing 17-2:
+
+<Listing number="17-2" file-name="src/main.rs" caption="Chaining with the `await` keyword">
+
+```rust
+{{#include ../listings/ch17-async-await/listing-scraper-02/src/main.rs:chaining}}
 ```
 
-The warning tells us that just calling `hello` was not enough: we also need to
-`.await` or poll the future it returns. This raises some important questions:
+</Listing>
 
-- Given there is no return type on the function, how is it returning a future?
-- What exactly is a future?
-- Why do we need to `.await` or poll futures to make them do something?
-- How do `.await` and polling relate to each other?
-
-We will work through each of these in turn. We can answer the first question by
-learning what the syntax means, so let’s start there.
-
-### Async Functions
+That’s our first async function! Before we call it, let’s talk a little about
+what we have written.
 
 In Rust, writing `async fn` is equivalent to writing a function which returns a
 *future* of the return type. That is, when the compiler sees a function like
-`async fn hello` in Listing 17-1, it is equivalent to a function defined like
-this instead:
+`async fn page_title_for` in Listing 17-1, it is equivalent to a function like
+this after both replacing the `async fn` with a non-async function definition:
 
 ```rust
 use std::future::Future;
 
-fn hello<'a>(name: &'a str) -> impl Future<Output = ()> + 'a {
+fn page_title_for(url: &str) -> impl Future<Output = Option<String>> + '_ {
     async move {
-        let greeting = format!("Hello, {name}!");
-        println!("{greeting}");
+        let text = trpl::get(url).await.text().await;
+        Html::parse(&text)
+            .select_first("title")
+            .map(|title| title.inner_html())
     }
 }
 ```
@@ -76,24 +124,101 @@ Let’s walk through each part of the transformed version:
 * It uses the `impl Trait` syntax we discussed back in the [“Traits as
   Parameters”][impl-trait] section in Chapter 10.
 * The returned trait is a `Future`, with an associated type of `Output`. Notice
-  that the `Output` type is `()`, which is the same as the the original return
-  type from the `async fn` version of `hello`.
+  that the `Output` type is `Option<String>`, which is the same as the the
+  original return type from the `async fn` version of `page_title_for`.
 * All of the code called in the body of the original function is wrapped in an
   `async move` block. Remember that blocks are expressions. This whole block is
   the expression returned from the function.
 * The new function body is an `async move` block because of how it uses the
   `name` argument.
-* The new version of the function makes the lifetime of the `name` parameter
-  explicit so that it can reference it in the output type.
-* The async block itself has the “unit” value `()`, since it ends with a
+* The async block itself has the type `Option<String>`, since it ends with a
   `println!` statement. That value matches the `Output` type in the return type.
+  This is just like other blocks you have seen.
+* The new version of the function has a kind of lifetime we have not seen before
+  in the output type: `'_`. Because the function returns a `Future` which refers
+  to a reference—in this case, the reference from the `name` parameter—we need
+  to tell Rust that we mean for that reference to be included. We do not have to
+  name it here, because Rust is smart enough to know there is only one reference
+  which could be involved, but we *do* have to be explicit that we want it.
 
 An `async` block corresponds to a data type which implements the `Future` trait,
 and the result of the async block will be the `Output` of the `Future`. Thus, an
 `async fn`’s return type is an anonymous data type the compiler creates for us,
 which implements `Future`. The associated `Output` type for the `Future` is the
-return type of the original `async fn`. Thus, calling `hello` in Listing 17-1
-returned a `Future<Output = ()>`.
+return type of the original `async fn`. Thus, when we call `page_title_for` in
+`main` in Listing 17-TODO, it returns a a `Future<Output = Option<String>>`.
+
+Next, we need to actually call this. Following the pattern we used for getting
+command line arguments back in Chapter 12, we can get two URLs from the user and
+call `page_title_for` with them, as shown in Listing 17-3.
+
+<!--
+  TODO: rewrite this not to await things? Minimally, this needs to show laziness
+    somehow, because it is not currently flagged up by the flow here. Maybe even
+    put it in the initial example building up `page_title_for`?
+-->
+
+<Listing number="17-3" file-name="src/main.rs" caption="Calling the `page_title_for` function from `main` with user-supplied arguments">
+
+```rust
+{{#include ../listings/ch17-async-await/listing-scraper-03/src/main.rs:main}}
+```
+
+</Listing>
+
+If we try to compile this, though, we get an error:
+
+<!-- manual-regeneration
+cd listings/ch17-async-await/listing-scraper-03
+cargo build
+copy just the compiler error
+-->
+
+```text
+error[E0728]: `await` is only allowed inside `async` functions and blocks
+  --> src/main.rs:12:56
+   |
+6  | fn main() {
+   | --------- this is not `async`
+...
+12 |     let winning_page = match trpl::race(first, second).await {
+   |                                                        ^^^^^ only allowed inside `async` functions and blocks
+```
+
+The only place we can use the `await` keyword is in async functions or blocks.
+We’ll see why that is below. For now, though, let’s try the obvious thing and
+mark `main` with the `async` keyword, as in Listing 17-4:
+
+<Listing number="17-4" file-name="src/main.rs" caption="Attempting to mark `main` as an `async fn`">
+
+```rust
+{{#include ../listings/ch17-async-await/listing-scraper-04/src/main.rs:async-main}}
+```
+
+</Listing>
+
+Adding `async` to the declaration of `main` fixed the previous compiler error,
+but resulted in a new one:
+
+<!-- manual-regeneration
+cd listings/ch17-async-await/listing-scraper-03/
+cargo build
+copy just the compiler error
+-->
+
+```text
+error[E0752]: `main` function is not allowed to be `async`
+ --> src/main.rs:6:1
+  |
+6 | async fn main() {
+  | ^^^^^^^^^^^^^^^ `main` function is not allowed to be `async`
+
+For more information about this error, try `rustc --explain E0752`.
+```
+
+This now compiles, and we can run it. Pick a couple URLs and run the command
+line tool. You may discover that some sites are reliably faster than others,
+while in other cases which site “wins” varies from run to run.
 
 Then Rust warned us that we did not do anything with the future. This is because
 futures are *lazy*: they don’t do anything until you ask them to with `await`.
@@ -110,14 +235,17 @@ actually needed.
 > the previous chapter, where the closure we passed to another thread started
 > running immediately. It is also different from how many other languages
 > approach async! But it is important for Rust. We will see why that is later.
+
 <!-- TODO: we need to pay off that promise later in the chapter! -->
 
-For now, let’s start by awaiting the future returned by `hello` to actually have
+<!-- TODO: rewrite/restructure this to integrate other version of it! -->
+
+For now, let’s start by awaiting the future returned by `page_title_for` to actually have
 it run. Rust’s `await` keyword goes after the expression you are awaiting, not
 before it. That is, it is a *postfix keyword*. (This is different from what you
 might be used to if you have used async in languages like JavaScript or C#. Rust
 chose this because it makes chains of methods much nicer to work with.) In
-Listing 17-2, we add `.await` to the `hello` call in `main`.
+Listing 17-2, we add `.await` to the `page_title_for` call in `main`.
 
 <Listing number="17-2" caption="Attempting to fix a compiler warning by awaiting a future" file-name="src/main.rs">
 
@@ -168,40 +296,13 @@ Every async program in Rust has at least one place where it sets up a runtime
 and executes the futures. Those runtimes also often supply async versions of
 common functionality like file or network I/O.
 
-> ### The `trpl` Crate
->
-> To keep this chapter focused on learning async, rather than juggling parts of
-> the ecosystem, we have created the `trpl` crate (`trpl` is short for “The Rust
-> Programming Language”). It re-exports all the types, traits, and functions you
-> will need, primarily from the [`futures`][futures-crate] and [`tokio`][tokio]
-> crates.
->
-> - The `futures` crate is an official home for Rust experimentation for async
->   code, and is actually where the `Future` type was originally designed.
->
-> - Tokio is the most widely used async runtime in Rust today, especially (but
->   not only!) for web applications. There are other great runtimes out there,
->   and they may be more suitable for your purposes. We use Tokio under the hood
->   for `trpl` because it is good and widely used.
->
-> In some cases, `trpl` also renames or wraps the original APIs to let us stay
-> focused on the details relevant to chapter. If you want to understand what the
-> crate does, we encourage you to check out [its source code][crate-source]. You
-> will be able to see what crate each re-export comes from, and we have left
-> extensive comments explaining what the crate does.
 
-Go ahead and add the `trpl` crate to your `hello-async` project:
-
-```console
-$ cargo add trpl
-```
-
-Then, in our `main` function, let’s wrap the call to `hello` with the
+Then, in our `main` function, let’s wrap the call to `page_title_for` with the
 `trpl::run` function, which takes in a `Future` and runs it until it completes.
-Since `hello` returns a `Future`, we could simply wrap it directly in
+Since `page_title_for` returns a `Future`, we could simply wrap it directly in
 `trpl::run`. However, for most of the examples in the chapter, we will be
 doing more than just one async function call, so instead we will pass an `async`
-block and explicitly await the result of calling `hello`.
+block and explicitly await the result of calling `page_title_for`.
 
 <Listing number="17-4" caption="Using the `run` helper function to wait on a future in non-async code" file-name="src/main.rs">
 
@@ -270,11 +371,17 @@ runtime. This is why you  may sometimes come across references to *executors*
 when looking into runtimes: an executor is the part of a runtime responsible for
 executing the async code.
 
+<!--
+  TODO: this next paragraph is still out of date for having restructured the
+    chapter; it references `Poll::Ready` but at this point we have not talked
+    about it, so that does not work!
+-->
+
 Now we can understand why the compiler stopped us from making `main` itself an
 async function in Listing 17-3. If `main` were an async function, something else
 would need to manage the state machine for whatever future `main` returned, but
 main is the starting point for the program! Instead, we use the `trpl::run`
-function, which sets up a runtime and polls the `Future` returned by `hello`
+function, which sets up a runtime and polls the `Future` returned by `page_title_for`
 until it returns `Ready`.
 
 > Note: some runtimes provide macros to make it so you *can* write an async main
